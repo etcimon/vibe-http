@@ -39,13 +39,24 @@ import std.format : format, formattedWrite;
 void handleHTTP1Connection(TLSStreamType)(TCPConnection connection, TLSStreamType tls_stream, StreamProxy http_stream, HTTPServerContext context, ref NetworkAddress remote_address)
 @safe {
 
-	while (!connection.empty) {
+	// TLS 1.3 (Botan) decrypts the first request in doHandshake when
+	// Finished+GET share a TCP packet. TCP is then empty; waiting on
+	// connection.empty deadlocks until the client times out.
+	for (;;) {
 		HTTPServerSettings settings;
 		bool keep_alive;
 
-		static if (HaveNoTLS) {} else {
-			// handle oderly TLS shutdowns
-			if (tls_stream && tls_stream.empty) break;
+		static if (!HaveNoTLS) {
+			if (tls_stream && tls_stream.dataAvailableForRead) {
+				// plaintext already in the TLS ring — do not wait on TCP
+			} else if (connection.empty) {
+				break;
+			} else if (tls_stream && tls_stream.empty) {
+				// orderly TLS shutdown
+				break;
+			}
+		} else {
+			if (connection.empty) break;
 		}
 
 		() @trusted {
@@ -57,8 +68,19 @@ void handleHTTP1Connection(TLSStreamType)(TCPConnection connection, TLSStreamTyp
 		if (!keep_alive) { logTrace("No keep-alive - disconnecting client."); break; }
 
 		logTrace("Waiting for next request...");
-		// wait for another possible request on a keep-alive connection
+		// TLS leftover: Botan onRead can decrypt the next request into
+		// the plaintext ring while TCP is already empty (OpenSSL uses
+		// SSL_pending the same way). Check before and after the TCP
+		// wait so a timeout cannot drop a pipelined record.
+		static if (!HaveNoTLS) {
+			if (tls_stream && tls_stream.dataAvailableForRead)
+				continue;
+		}
 		if (!connection.waitForData(settings.keepAliveTimeout)) {
+			static if (!HaveNoTLS) {
+				if (tls_stream && tls_stream.dataAvailableForRead)
+					continue;
+			}
 			if (!connection.connected) logTrace("Client disconnected.");
 			else logDebug("Keep-alive connection timed out!");
 			break;

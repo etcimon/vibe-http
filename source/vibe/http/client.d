@@ -985,6 +985,9 @@ final class HTTPClientRequest : HTTPRequest {
 			m_bodyWriter = typeof(m_bodyWriter).init;
 			m_conn = typeof(m_conn).init;
 		}
+		// BotanTLSStream coalesces writes; a header-only GET never
+		// touches bodyWriter. OpenSSL SSL_write hid the missing flush.
+		if (m_conn) m_conn.flush();
 	}
 
 	private string clengthString(ulong len)
